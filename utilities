@@ -1,0 +1,185 @@
+import random
+random.seed(2020)
+
+import tensorflow as tf
+from tensorflow import keras
+
+import os
+import tempfile
+
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+
+from scipy import sparse
+
+import sklearn
+from sklearn.metrics import confusion_matrix
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import average_precision_score
+from sklearn.metrics import roc_curve, auc
+
+import nltk
+import string 
+import re 
+
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+
+import nltk
+nltk.download('punkt')
+
+import nltk
+nltk.download('stopwords')
+
+from collections import Counter
+
+def addDomainFeatures(data):
+    """
+    Parse reviews and return custom features. 
+    """
+
+    length = []
+    for i in data.index:
+        length.append(len(data['review'][i].split(' ')))
+    print('length feature added')
+        
+    numbers = []
+    for i in data.index:
+        alph = list(filter(str.isdigit, data['review'][i]))  
+        if len(alph) == 0:
+            numbers.append(0)
+        else:
+            numbers.append(sum(map(str.isdigit, alph)) / len(alph))
+    print('number feature added')
+    
+    caps = []
+    for i in data.index:
+        alph = list(filter(str.isalpha, data['review'][i]))  
+        if len(alph) == 0:
+            caps.append(0)
+        else:
+            caps.append(sum(map(str.isupper, alph)) / len(alph))
+    print('caps feature added')
+    
+    num_sent = []
+    for i in data.index:
+        num_sent.append(len(data['review'][i].split('.')))
+    print('num_sent feature added')
+    
+    data['length'] = length
+    data['numbers'] = numbers
+    data['caps'] = caps
+    data['num_sent'] = num_sent
+        
+   #avg word length 
+    data['avg_words'] = pd.Series()
+    for i in data.index:
+        words = data['review'][i].split(' ')
+        if len(words) == 0:
+            data['avg_words'][i] = 0
+        else:
+            data['avg_words'][i] = sum(len(word) for word in words) / len(words)
+    print('avg_words feature added')
+    
+    #percent of total user reviews written by the user
+    data['perc_tot_user_reviews']=data.groupby('user_id')['user_id'].transform('count')/data.shape[0]
+    print('perc_tot_user_reviews feature added')
+    
+    return data
+
+def preprocessing(data):
+    """
+    Preprocess 'review" with nltk
+    """
+    
+    for i in range(len(data['review'])):
+        tokens = word_tokenize(data['review'][i])
+
+        # convert to lower case
+        tokens = [w.lower() for w in tokens]
+
+        # remove punctuation from each word
+        table = str.maketrans('', '', string.punctuation)
+        stripped = [w.translate(table) for w in tokens]
+
+        # remove remaining tokens that are not alphabetic
+        words = [word for word in stripped if word.isalpha()]
+
+        # filter out stop words
+        stop_words = set(stopwords.words('english'))
+        words = [w for w in words if not w in stop_words]
+
+        output = ' '
+        output = output.join(words)
+
+        data['review'][i] = output
+
+def POSTagging(data):
+    """
+    Add parts of speech tags for "review"
+    """
+    start = time.time()
+    c = len(data['review'])
+    POS_dic = {'CC':[0]*c, 'CD':[0]*c, 'DT': [0]*c, 'EX': [0]*c, 'FW': [0]*c, 'IN': [0]*c, 'JJ': [0]*c, 
+           'JJR': [0]*c, 'JJS': [0]*c, 'LS': [0]*c, 'MD': [0]*c, 'NN': [0]*c, 'NNS': [0]*c, 'NNP': [0]*c, 
+           'NNPS': [0]*c, 'PDT': [0]*c, 'POS': [0]*c, 'PRP': [0]*c, 'PRP$': [0]*c, 'RB': [0]*c, 'RBR': [0]*c, 
+           'RBS': [0]*c, 'RP': [0]*c, 'TO': [0]*c, 'UH': [0]*c, 'VB': [0]*c, 'VBD': [0]*c, 'VBG': [0]*c, 
+           'VBN': [0]*c, 'VBP': [0]*c, 'VBZ': [0]*c, 'WDT': [0]*c, 'WP': [0]*c, 'WP$': [0]*c, 'WRB': [0]*c}
+
+    for i in range(c):
+        if len(data['review'][i]) != 0:
+            tagged = nltk.pos_tag(data['review'][i].split(' '))
+            counts = Counter(tag for word,tag in tagged)
+            total = sum(counts.values())
+            test = dict((word, float(count)/total) for word,count in counts.items())
+            for k,v in test.items():
+                if k in POS_dic.keys():
+                    POS_dic[k][i] = v
+    end = time.time()
+    
+    POS = pd.DataFrame(POS_dic)
+    
+    data = pd.concat([data, POS], axis=1)
+    print('POS tagging features added')
+    
+    return data 
+
+def tokenize(data):
+    """
+    Tokenize data required for Word2Vec & Doc2Vec
+    """
+    data = data.replace(np.nan, " ")
+    #tokenize reviews and store in separate column for vectorizers
+    data['tokens'] = pd.Series()
+    for i in range(len(data['review'])):
+        data['tokens'][i] = word_tokenize(data['review'][i])
+    
+    return data
+
+def Doc2Vec_input(data):
+    """
+    Returns appropriate input data for Doc2Vec model
+    Tag reviews with tokens and labels
+    """
+    train_doc =[]
+    for i in range(0,data.shape[0]):
+        train_doc.append(TaggedDocument(data['tokens'][i],str(data['label'][i]))) 
+    
+    return train_doc
+
+def Doc2Vec_vectorize(model, data, epochs=1):
+    """
+    Creates feature vectors for each review
+    """
+    targets, feature_vectors = zip(*[(doc.tags[0], dv_model.infer_vector(doc.words, epochs =epochs)) for doc in data])
+    return np.array(feature_vectors)
+    
+def AUCcalc(y_val_val, y_pred):
+    fpr, tpr, thresholds = roc_curve(y_val_val, y_pred)
+    tauc = auc(fpr, tpr)
+    return tauc
+
